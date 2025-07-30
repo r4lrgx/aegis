@@ -1,68 +1,144 @@
 package endpoints
 
 import (
-    "bytes"
-    "io"
-    "mime/multipart"
-    "net/http"
-    "os"
-    "path/filepath"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
-    "github.com/r4lrgx/aegis/utils"
-    "github.com/r4lrgx/aegis/config"
+	"github.com/r4lrgx/aegis/utils"
 )
 
 func POST(w http.ResponseWriter, r *http.Request) {
-    utils.Log("POST request, files uploaded")
+	utils.Log("POST request received")
 
-    var b bytes.Buffer
-    writer := multipart.NewWriter(&b)
+	contentType := r.Header.Get("Content-Type")
+	isJSON := strings.HasPrefix(contentType, "application/json")
 
-    r.ParseMultipartForm(32 << 20)
-    files := r.MultipartForm.File["file"]
+	var body []byte
+	var err error
 
-    for i, fileHeader := range files {
-        file, err := fileHeader.Open()
-        if err != nil {
-            http.Error(w, "Unable to read uploaded file", http.StatusInternalServerError)
-            return
-        }
-        defer file.Close()
+	if isJSON {
+		body, err = HandleJSONPayload(r)
+	} else {
+		body, err = HandleMultipartPayload(r)
+	}
 
-        dst, err := os.Create(filepath.Join("uploads", fileHeader.Filename))
-        if err != nil {
-            http.Error(w, "Error saving file", http.StatusInternalServerError)
-            return
-        }
-        io.Copy(dst, file)
-        dst.Close()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-        fw, _ := writer.CreateFormFile("file"+string(rune(i+1)), fileHeader.Filename)
-        fr, _ := os.Open(filepath.Join("uploads", fileHeader.Filename))
-        io.Copy(fw, fr)
-        fr.Close()
-    }
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
+}
 
-    if r.FormValue("payload_json") != "" {
-        writer.WriteField("payload_json", r.FormValue("payload_json"))
-    }
-    writer.Close()
+func HandleJSONPayload(r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON body")
+	}
 
-    req, _ := http.NewRequest("POST", config.Webhook, &b)
-    req.Header.Set("Content-Type", writer.FormDataContentType())
+	var payload map[string]interface{}
+	err = json.Unmarshal(body, &payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON body")
+	}
 
-    resp, err := http.DefaultClient.Do(req)
-    if err != nil {
-        http.Error(w, "Failed to reach the webhook", http.StatusBadGateway)
-        return
-    }
-    defer resp.Body.Close()
+	var b bytes.Buffer
+	writer := multipart.NewWriter(&b)
+	var uploadedFiles []string
 
-    body, _ := io.ReadAll(resp.Body)
+	if attachments, ok := payload["attachments"].([]interface{}); ok {
+		for i, item := range attachments {
+			a, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
 
-    for _, fileHeader := range files {
-        os.Remove(filepath.Join("uploads", fileHeader.Filename))
-    }
+			fileName, _ := a["filename"].(string)
+			dataStr, _ := a["data"].(string)
 
-    w.Write(body)
+			data, err := base64.StdEncoding.DecodeString(dataStr)
+			if err != nil {
+				continue
+			}
+
+			tempPath := filepath.Join("uploads", fmt.Sprintf("json_%d_%s", i, fileName))
+			if err := os.WriteFile(tempPath, data, 0644); err != nil {
+				continue
+			}
+			uploadedFiles = append(uploadedFiles, tempPath)
+
+			fieldName := utils.GetFieldName(i)
+			if err := utils.AttachFile(writer, fieldName, tempPath, fileName); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	delete(payload, "attachments")
+	payloadJSON, _ := json.Marshal(payload)
+	writer.WriteField("payload_json", string(payloadJSON))
+	writer.Close()
+
+	return utils.SendMultipart(writer, &b, uploadedFiles)
+}
+
+func HandleMultipartPayload(r *http.Request) ([]byte, error) {
+	err := r.ParseMultipartForm(64 << 20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse multipart form")
+	}
+
+	var b bytes.Buffer
+	writer := multipart.NewWriter(&b)
+	var uploadedFiles []string
+
+	var files []*multipart.FileHeader
+	for i := 0; i < 100; i++ {
+		key := utils.GetFieldName(i)
+		if f := r.MultipartForm.File[key]; len(f) > 0 {
+			files = append(files, f...)
+		}
+	}
+
+	for i, fh := range files {
+		fieldName := utils.GetFieldName(i)
+
+		src, err := fh.Open()
+		if err != nil {
+			return nil, fmt.Errorf("unable to read uploaded file")
+		}
+		defer src.Close()
+
+		tempPath := filepath.Join("uploads", fmt.Sprintf("form_%d_%s", i, fh.Filename))
+		dst, err := os.Create(tempPath)
+		if err != nil {
+			return nil, fmt.Errorf("error saving file")
+		}
+		_, err = io.Copy(dst, src)
+		dst.Close()
+		if err != nil {
+			return nil, fmt.Errorf("error copying file")
+		}
+		uploadedFiles = append(uploadedFiles, tempPath)
+
+		if err := utils.AttachFile(writer, fieldName, tempPath, fh.Filename); err != nil {
+			return nil, err
+		}
+	}
+
+	if payload := r.FormValue("payload_json"); payload != "" {
+		writer.WriteField("payload_json", payload)
+	}
+	writer.Close()
+
+	return utils.SendMultipart(writer, &b, uploadedFiles)
 }

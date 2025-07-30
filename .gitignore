@@ -24,7 +24,7 @@ uploads/
 !.env.example
 
 # IP logs
-IPS.txt
+ips.txt
 
 # JetBrains IDEs (GoLand, IntelliJ)
 .idea/
