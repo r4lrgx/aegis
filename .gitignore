@@ -8,12 +8,9 @@
 # Test binary, built with `go test -c`
 *.test
 
-# Go cache and dependency files
+# Go build system artifacts
 go.sum
 go.work
-
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
 
 # Uploads (runtime-generated files)
 uploads/
@@ -26,11 +23,8 @@ uploads/
 # IP logs
 ips.txt
 
-# JetBrains IDEs (GoLand, IntelliJ)
+# IDE-specific folders (JetBrains family: GoLand, IntelliJ, etc.)
 .idea/
-
-# MacOS system files
-.DS_Store
 
 # Windows system files
 Thumbs.db
